@@ -1,7 +1,5 @@
 streamlit
-easyocr
-torch==2.14.1
-torchvision==0.29.1
+pytesseract
 pandas
 pillow
 numpy
