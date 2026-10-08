@@ -1,4 +1,6 @@
 import re
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -119,6 +121,9 @@ st.markdown(
         font-size: .9rem;
         opacity: .78;
     }
+    [data-testid="stFileUploaderDropzoneInstructions"] {
+        display: none;
+    }
     </style>
     <section class="hero">
         <h1>🎓 Semester GPA Calculator</h1>
@@ -130,31 +135,38 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# EasyOCR
+# Tesseract OCR
 # ---------------------------------------------------------
 
 @st.cache_resource
 def get_ocr_reader():
-    """
-    Create the OCR reader once and reuse it.
-
-    The first run downloads the EasyOCR model.
-    """
+    """Verify that the lightweight Tesseract OCR dependency is available."""
     try:
-        import easyocr
+        import pytesseract
     except ImportError as exc:  # pragma: no cover - handled at runtime
         raise RuntimeError(
-            "EasyOCR is not installed. Install the app dependencies "
+            "Tesseract OCR is not installed. Install the app dependencies "
             "with 'python -m pip install -r requirements.txt'."
         ) from exc
 
-    return easyocr.Reader(["en"], gpu=False, verbose=False)
+    local_tesseract = (
+        Path.home()
+        / "AppData"
+        / "Local"
+        / "Programs"
+        / "Tesseract-OCR"
+        / "tesseract.exe"
+    )
+    if local_tesseract.is_file():
+        pytesseract.pytesseract.tesseract_cmd = str(local_tesseract)
+
+    return pytesseract
 
 
 def read_image(image):
     """Read text from one or more uploaded mark-sheet images."""
 
-    reader = get_ocr_reader()
+    ocr = get_ocr_reader()
 
     if not isinstance(image, list):
         image = [image]
@@ -163,12 +175,36 @@ def read_image(image):
 
     for page in image:
         image_array = np.array(page)
-        results = reader.readtext(image_array)
-        detections = [
-            (box, detected_text)
-            for box, detected_text, confidence in results
-            if confidence >= 0.30
-        ]
+        try:
+            results = ocr.image_to_data(
+                image_array,
+                output_type=ocr.Output.DICT,
+            )
+        except ocr.TesseractNotFoundError as exc:
+            raise RuntimeError(
+                "The Tesseract OCR engine is unavailable. "
+                "Install the system dependency listed in packages.txt."
+            ) from exc
+        except ocr.TesseractError as exc:
+            raise RuntimeError(f"Tesseract could not read the image: {exc}") from exc
+
+        detections = []
+        for index, detected_text in enumerate(results["text"]):
+            try:
+                confidence = float(results["conf"][index])
+            except ValueError:
+                continue
+
+            if confidence < 30 or not detected_text.strip():
+                continue
+
+            left = int(results["left"][index])
+            top = int(results["top"][index])
+            right = left + int(results["width"][index])
+            bottom = top + int(results["height"][index])
+            box = [[left, top], [right, top], [right, bottom], [left, bottom]]
+            detections.append((box, detected_text.strip()))
+
         text.extend(group_ocr_detections(detections))
 
     return text
@@ -295,6 +331,8 @@ def parse_line(line, credit_point_layout=False):
         return None
 
     values = [float(number) for number in numbers]
+    if re.match(r"^\s*\d+\s+[A-Za-z]", line):
+        values = values[1:]
 
     # Remove numbers from the line to obtain the subject.
     subject = re.sub(
@@ -303,7 +341,13 @@ def parse_line(line, credit_point_layout=False):
         line,
     )
     subject = re.sub(
-        r"\b(pass|fail|th\.?|pr\.?)\b",
+        r"\b(pass|fail|th|pr)\.?\b",
+        "",
+        subject,
+        flags=re.IGNORECASE,
+    )
+    subject = re.sub(
+        r"\b(?:o|a\+?|b\+?|be|c\+?|d|e|f|s|ab|at)\b\.?$",
         "",
         subject,
         flags=re.IGNORECASE,
@@ -313,7 +357,7 @@ def parse_line(line, credit_point_layout=False):
         r"\s+",
         " ",
         subject,
-    ).strip(" -:|")
+    ).strip(" -:|.")
 
     if not subject or not re.search(r"[a-zA-Z]", subject):
         return None
@@ -341,24 +385,10 @@ def parse_line(line, credit_point_layout=False):
             credits = None
     else:
         # Standard rows list Credits, Grade Point, then optionally Credit Points.
-        credit_index = next(
-            (
-                index
-                for index, value in enumerate(values)
-                if 0 < value <= 10
-            ),
-            None,
-        )
-        if credit_index is not None:
-            credits = values[credit_index]
-            grade_point = next(
-                (
-                    value
-                    for value in values[credit_index + 1:]
-                    if 0 <= value <= 10
-                ),
-                None,
-            )
+        if 0 <= values[0] <= 10:
+            credits = values[0]
+        if len(values) > 1 and 0 <= values[1] <= 10:
+            grade_point = values[1]
 
     return {
         "Subject": subject,
@@ -502,6 +532,7 @@ uploaded_file = st.file_uploader(
         "pdf",
     ],
 )
+st.caption("Accepted formats: JPG, JPEG, PNG, WEBP, PDF")
 
 
 if uploaded_file:
@@ -660,6 +691,8 @@ if st.button(
 
 
 st.markdown(
-    '<footer class="app-footer">Developed by Mohamed Imraan</footer>',
+    '<footer class="app-footer">Developed by '
+    '<a href="https://www.linkedin.com/in/mohamed-imraan-full-stack-developer/" '
+    'target="_blank" rel="noopener noreferrer">Mohamed Imraan</a></footer>',
     unsafe_allow_html=True,
 )
